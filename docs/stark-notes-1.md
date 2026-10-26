@@ -1,6 +1,44 @@
 # STARK Fundamentals — Review Notes
 
-*Merged: conceptual notes + end-to-end pipeline walkthrough. Organized for spaced review — Parts I–IV are the conceptual substrate, Part V is the synthesis that uses all of it, Parts VI–VII are the protocol layer wrapped around it.*
+*A reference for learning how STARKs work, organized for spaced review. Parts I–IV are the conceptual substrate, Part V is the end-to-end pipeline that uses all of it, Parts VI–VII are the protocol layer wrapped around it, and Part VIII builds the commitment and FRI step by step. Each worked example sits inside the part whose concept it illustrates, and the three examples share numbers: Example B's quotient is the polynomial Example C commits to.*
+
+## Contents
+
+- **Part I — Why STARKs need only a hash function**
+- **Part II — Finite fields**
+  - Field capacity as a budget
+  - *Example A — From a prime to a trace domain*
+- **Part III — The two facts**
+  - Fact 1: a degree-$d$ polynomial has at most $d$ roots
+  - Fact 2: $f(a) = y \iff (X-a) \mid (f(X) - y)$
+- **Part IV — Why low-degree claims matter**
+- **Part V — The end-to-end pipeline**
+  - 1 Field setup · 2 Trace & arithmetization · 3 Quotient by the vanishing polynomial
+  - *Example B — From a trace to a quotient (and what a lie does)*
+  - 4 Low-degree extension · 5 Commitment & verification
+- **Part VI — Interactive proof systems**
+- **Part VII — Fiat–Shamir**
+- **Part VIII — Polynomial commitment with a Reed–Solomon Merkle tree + FRI**
+  - *Example C — Steps 1–6, including a cheating prover*
+- **Threads not yet covered**
+- **Recall prompts**
+
+## Notation used throughout
+
+| Symbol | Meaning |
+|---|---|
+| $p$ | the field's prime; $\mathbb{F}_p$ the field |
+| $T$ | trace length (number of rows), a power of two |
+| $D$ | trace domain $\{1, \omega, \ldots, \omega^{T-1}\}$, where $\omega$ has order $T$ |
+| $w$ | number of registers (trace columns) |
+| $c$ | degree of the transition constraints |
+| $d$ | degree bound of the polynomial FRI tests (for the quotient, $d \approx (c-1)T$) |
+| $K$ | blowup factor; $N = K \cdot T$ is the evaluation domain size |
+| $h$ | coset offset; the evaluation domain is $h \cdot \langle \omega_N \rangle$ |
+| $\rho$ | code rate $d/N$ |
+| $s$ | number of FRI queries |
+
+A generic $n$ means "some domain size" in statements that hold for any size.
 
 ---
 
@@ -33,6 +71,47 @@
 - Everything downstream — trace domain, evaluation domain, challenge space — is drawn from the same universe of $p-1$ nonzero elements. The prime is not just an arithmetic choice; it's the **capacity constraint** on domain sizes and the **entropy constraint** on challenges.
 - The two constraints pull apart, which is why they get solved separately: domain size is bounded by the **2-adicity** of $p-1$, while challenge entropy is bounded by $|\mathbb{F}|$ and is repaired by sampling from an extension field rather than by enlarging $p$.
 
+### Example A — From a prime to a trace domain
+
+*This is the field used in Anatomy of a STARK. Every number below was checked by script.*
+
+**Step 1 — Choose a prime with high 2-adicity.**
+- $p = 1 + 407 \cdot 2^{119} = 270497897142230380135924736767050121217$, a 128-bit prime.
+- The multiplicative group has $p - 1 = 407 \cdot 2^{119}$ elements, and $407 = 11 \cdot 37$, so the **2-adicity is exactly 119**.
+- Because $\mathbb{F}_p^\times$ is cyclic, there is exactly one subgroup of each order $2^k$ for $k \le 119$, and they nest inside each other: order 2 inside order 4 inside order 8, and so on up to $2^{119}$. That ceiling is the largest power-of-two domain this field can ever support.
+- **For comparison:** a 128-bit field is unusually large. Anatomy picks it so that challenges drawn from the base field already have enough entropy and no extension field is needed. Production systems use small fields (Goldilocks: 64 bits, 2-adicity 32; BabyBear: 31 bits, 2-adicity 27) plus extension fields for challenges, because small-field arithmetic is far faster.
+
+**Step 2 — Fix a generator of the 2-power subgroup.**
+- The hardcoded constant is $g = 85408008396924667383611388730472331217$.
+- **How to check its order is exactly $2^{119}$:** confirm $g^{2^{119}} = 1$ *and* $g^{2^{118}} \neq 1$. Both hold. The second check is what rules out a smaller order, because any order dividing $2^{119}$ is itself a power of two, so if it were smaller it would divide $2^{118}$.
+- **Precision point:** Anatomy calls this the field's "generator," but $g$ does **not** generate all of $\mathbb{F}_p^\times$ (it fails the test at the factors 11 and 37). It generates only the order-$2^{119}$ subgroup, which is the only subgroup FFT domains need. The usual way to find such an element is to take a generator $\gamma$ of the whole group and set $g = \gamma^{407}$.
+
+**Step 3 — Shrink to the size you need by repeated squaring.**
+- Squaring an element of order $2^k$ gives an element of order $2^{k-1}$. So `primitive_nth_root(n)` starts at $g$ and squares until the order reaches $n$.
+- For $n = 1024 = 2^{10}$, that takes $119 - 10 = 109$ squarings, giving $\omega = g^{2^{109}} = 157047144299673000979490264221078274179$.
+- Checks: $\omega^{1024} = 1$, $\omega^{512} \neq 1$, and in fact $\omega^{512} = -1$. That last fact is the $\omega^{i + n/2} = -\omega^i$ identity that pairs $x$ with $-x$ in both the FFT and FRI folding (Example C, Step 3).
+
+**Step 4 — Lay the trace on the domain.**
+- The domain is $D = \{\omega^0, \omega^1, \ldots, \omega^{1023}\}$, with $\omega^0 = 1$. Row $i$ of the trace sits at $\omega^i$.
+- Example: a two-register Fibonacci trace, with the rule $(x, y) \mapsto (y, x + y)$:
+
+| Row $i$ | $x$ | $y$ | Domain point |
+|---|---|---|---|
+| 0 | 1 | 1 | $\omega^0 = 1$ |
+| 1 | 1 | 2 | $\omega^1$ |
+| 2 | 2 | 3 | $\omega^2$ |
+| 3 | 3 | 5 | $\omega^3$ |
+| … | … | … | … |
+| 1023 | $F_{1024} \bmod p$ | $F_{1025} \bmod p$ | $\omega^{1023}$ |
+
+- **All values are reduced mod $p$.** $F_{1024}$ is about 710 bits as an integer, but in the trace it is just a field element below $p$. The trace never holds big integers.
+- **Wrap-around:** $\omega \cdot \omega^{1023} = \omega^{1024} = 1 = \omega^0$, so "next row" after the last row is row 0. The domain is a cycle, which is why transition constraints must exclude the last row; it has no real successor (Part V.3, and Example B shows it happening).
+- **Interpolation:** each column becomes its own polynomial of degree $< 1024$, so this trace gives **two** polynomials, $t_x(X)$ and $t_y(X)$. Computing them from the values is an **inverse NTT**, which runs in $O(n \log n)$.
+
+**What this domain is and isn't.** $D$ is the **trace domain** (size $T = 1024$). It is *not* the evaluation domain. The evaluation domain is $K$ times larger and shifted to a coset (Part V.4), and building it takes the same steps: `primitive_nth_root(K · 1024)`, with every point multiplied by a coset offset $h$. As long as $K \cdot 1024 \le 2^{119}$, the field has room, so this field has plenty.
+
+> ⚠ **Terminology.** The domain is sometimes drawn as a "circle" of points because $\omega^i$ cycles back to 1. That's a fair picture, but it is unrelated to **Circle STARKs**, which use the points on an actual curve $x^2 + y^2 = 1$ to get FFT domains in fields like Mersenne-31 that lack 2-adicity.
+
 ---
 
 ## Part III — The two facts
@@ -51,7 +130,7 @@
 - Plug in $X = a$: the $q(a)$ term dies → **$r = f(a)$**. Evaluating and dividing are the same operation.
 - **The key reframing: a lie doesn't produce a *wrong* quotient, it produces a *high-degree* one.** Honest division → a genuine polynomial of low degree. Dishonest → a rational function with a pole, whose values on the remaining points interpolate to near-maximal degree.
 - So the verifier never checks the original statement — only a **degree bound**. Checking degree bounds is exactly what FRI does.
-- **This is the converter** that turns the whole tutorial's arc ("computational claims → low-degree claims") into a mechanism.
+- **This is the converter** that turns Anatomy of a STARK's whole arc ("computational claims → low-degree claims") into a mechanism.
 - Boundary constraint in practice: "trace starts at 1" → prover exhibits $\frac{t(X) - 1}{X - 1}$ and proves it's low degree.
 - **Generalization — vanishing polynomial:** $Z_S(X) = \prod_{s \in S}(X-s)$. "$f$ vanishes on all of $S$" = "$Z_S \mid f$". Transition constraints use this: one division enforces every step.
 - When $S$ = roots of unity, $Z_S(X) = X^n - 1$ — sparse, evaluable in $\log n$ time instead of $n$. **Another reason that domain is chosen.**
@@ -60,13 +139,13 @@
 
 ## Part IV — Why low-degree claims matter (three strands)
 
-1. **Degree is the scarcity that makes a claim non-vacuous.** Without a degree bound, "vanishes on the trace domain" says nothing — interpolate anything through $n$ points.
+1. **Degree is the scarcity that makes a claim non-vacuous.** Without a degree bound, "vanishes on the trace domain" says nothing, because a polynomial can be interpolated through any values at any set of points.
 2. **Fact 2 already converted every claim into a degree claim.** Boundary conditions, transition rules, the whole execution — after arithmetization only *one kind of claim* remains. That collapse is why FRI is the only machinery needed on top of the hash.
-3. **Low degree makes random sampling work, quantitatively.** With rate $\rho = d/n = 1/4$, a liar's table differs from every valid codeword in $\ge 3/4$ of positions → one query catches with prob. $3/4$; 20 queries → $\approx 1 - 10^{-12}$.
+3. **Low degree makes random sampling work, quantitatively.** With rate $\rho = d/N = 1/4$, a liar's table differs from every valid codeword in $\ge 3/4$ of positions → one query catches with prob. $3/4$; 20 queries → $\approx 1 - 10^{-12}$.
 
 - **Rate is the main tuning knob:** lower rate → better soundness per query, but larger domain → more prover work and bigger Merkle trees.
 
-> ⚠ **Precision check on strand 3.** The clean $1-\rho$ bound holds against a table that *is itself a different codeword*. A table that is merely **close to** a valid codeword without being one is the hard case, and bounding a cheating prover there is exactly what the **proximity-gap conjectures** cover — the unproven assumption flagged in Part I. Keep the clean bound as intuition, but know it's the idealized version.
+> ⚠ **Precision check on strand 3.** The clean $1-\rho$ bound holds against a table that *is itself a different codeword*. A table that is merely **close to** a valid codeword without being one is the hard case, and bounding a cheating prover there is exactly what **proximity-gap** results cover. They are proven for moderate parameters and only conjectured for the aggressive ones; that conjectured part is the unproven assumption flagged in Part I. Example C (Step 6) shows a concrete close-to-a-codeword cheat. Keep the clean bound as intuition, but know it's the idealized version.
 
 ---
 
@@ -84,32 +163,65 @@
 - **Execution trace (matrix).** Run the computation normally and record it: a 2D table of $T$ rows (steps), with columns holding the state registers over time. The witness is a free byproduct of doing the work — nothing is searched for. (→ Part VI, *Simplification 1*.)
 - **Trace polynomials $t(X)$.** Interpolate each column over the trace domain of size $T$ → polynomials of degree $< T$. The domain is the roots-of-unity subgroup, so "next row" is multiplication by $\omega$.
 - **Transition constraints $C(X)$.** Algebraic formulas asserting every step obeyed the program logic, written over $t_i(X)$ and $t_i(\omega X)$.
-- **Constraint multiplier & max degree $d$.** A degree-$c$ constraint applied to degree-$(<T)$ trace polynomials yields degree $\approx c \cdot T$. That product is the target degree bound $d$, and it is what sets the blowup requirement downstream.
+- **Degree bookkeeping.** A degree-$c$ constraint applied to trace polynomials of degree $< T$ gives a polynomial of degree about $c \cdot T$. Dividing by the vanishing polynomial (degree $\approx T$) leaves a quotient of degree about $(c-1) \cdot T$. **That quotient bound is $d$, the degree FRI must test**, and it is what sets the blowup in step 4.
+- **Batching constraints.** Multiple constraints are not proven separately. The verifier sends random coefficients, and the prover forms a **random linear combination** of all constraints into one *composition polynomial*. Soundness of the batching is again Fact 1: if any constituent is nonzero, the combination is nonzero except with probability $\approx 1/|\mathbb{F}|$. This is the second place extension-field challenges are needed.
 
-> ⚠ **Missing step worth adding.** Multiple constraints are not proven separately. The verifier sends random coefficients and the prover forms a **random linear combination** of all constraints into one *composition polynomial*. Soundness of the batching is again Fact 1: if any constituent is nonzero, the combination is nonzero except with probability $\approx 1/|\mathbb{F}|$. This is also the second place extension-field challenges are needed.
+### 3. Quotient by the vanishing polynomial
 
-### 3. Boundary enforcement & polynomial division
-
-- **Vanishing polynomial $Z(X)$.** Zero at every point of the trace domain; equals $X^T - 1$ for the roots-of-unity domain. (→ Part III, Fact 2 generalization.)
+- **Vanishing polynomial $Z(X)$.** Zero at exactly the rows where the constraint must hold (→ Part III, Fact 2 generalization).
+  - For a constraint on **every** row of the domain, $Z(X) = X^T - 1$.
+  - **Transition constraints skip the last row**, because its "next row" wraps around to row 0 (Example A, Step 4). So $Z(X) = \frac{X^T - 1}{X - \omega^{T-1}}$, which still costs only a few operations to evaluate.
+  - **Boundary constraints** use a single linear factor: "register $i$ equals $y$ at row $j$" becomes $\frac{t_i(X) - y}{X - \omega^j}$.
 - **Quotient polynomial $Q(X)$.** Divide the composition polynomial by $Z(X)$.
-- **Algebraic scarcity.** An honest execution yields a genuine low-degree $Q(X)$ of degree $\approx d - T$. A dishonest step yields a rational function with poles, whose values interpolate to a high-degree mess approaching degree $N-1$. **The lie is not a wrong value — it is a degree explosion.** (→ Part III, Fact 2, key reframing.)
+- **Algebraic scarcity.** An honest execution yields a genuine polynomial $Q(X)$ of degree $< d$. A dishonest step yields a rational function with poles, whose values interpolate to a high-degree mess approaching degree $N-1$. **The lie is not a wrong value — it is a degree explosion.** (→ Part III, Fact 2, key reframing.)
 
-> ⚠ **Operational gap.** This division cannot be performed in evaluation form on the trace domain, because $Z$ is zero at every point there — every division is $0/0$. The quotient is computed on a **coset** $gD$, where $Z(g\omega^i) = g^T - 1$ is a nonzero *constant*, so the whole division costs one inversion plus $N$ multiplications. Coset evaluation is not an optimization here; it's what makes the step defined at all.
+> ⚠ **Why the division needs a coset.** This division cannot be performed in evaluation form on the trace domain, because $Z$ is zero at every point there, so every division is $0/0$. The quotient is computed on a **coset** $h \cdot \langle \omega_N \rangle$ that avoids the trace domain. For $Z = X^T - 1$ it takes a nonzero *constant* value there, $h^T - 1$, so the whole division costs one inversion plus $N$ multiplications. For the transition version, the numerator is that same constant and only the single factor $X - \omega^{T-1}$ varies, so it stays cheap. Coset evaluation is not an optimization here; it's what makes the step defined at all.
+
+### Example B — From a trace to a quotient (and what a lie does)
+
+*Field $\mathbb{F}_{17}$, every number computed by script. Small enough to check by hand.*
+
+**The computation.** One register; the rule is "square the value each step"; start at 2; $T = 4$ rows.
+
+| Row | 0 | 1 | 2 | 3 |
+|---|---|---|---|---|
+| Value | 2 | 4 | 16 | 1 |
+
+($16^2 = 256 \equiv 1$.)
+
+**Step 1 — Interpolate the trace.** $\omega = 4$ has order 4, so $D = \{1, 4, 16, 13\}$, and row $i$ sits at $\omega^i$. The trace polynomial is
+$$t(X) = 8X^3 + 16X^2 + 2X + 10$$
+Check: $t(1) = 2$, $t(4) = 4$, $t(16) = 16$, $t(13) = 1$.
+
+**Step 2 — Write the rule as a polynomial.** "Next value = current value squared" becomes
+$$C(X) = t(\omega X) - t(X)^2 = 4X^6 + 16X^5 + X^4 + 16X^3 + 2X + 12$$
+$t(\omega X)$ is the next row, because multiplying by $\omega$ moves one step along the domain. The degree is $6 = c \cdot (T - 1)$ with $c = 2$.
+
+On the domain, $C$ takes the values $[0, 0, 0, 1]$. It's zero on rows 0–2, where the rule must hold. Row 3 is nonzero only because its "next row" wraps to row 0, which is exactly why transition constraints skip the last row.
+
+**Step 3 — Divide out the rows where the rule must hold.**
+$$Z(X) = (X-1)(X-4)(X-16) = \frac{X^4 - 1}{X - 13} = X^3 + 13X^2 + 16X + 4$$
+$$Q(X) = \frac{C(X)}{Z(X)} = 4X^3 + 15X^2 + 14X + 3, \quad \text{remainder } 0$$
+$Q$ is a genuine polynomial of degree 3, within the bound $d = (c-1) \cdot T = 4$. **That's the certificate:** showing $Q$ is low degree proves every step was a correct squaring. Part VIII commits to exactly this $Q$.
+
+**The cheat.** The prover writes 15 instead of 16 at row 2: trace $[2, 4, 15, 1]$.
+- Interpolation still works, since any 4 values have a polynomial through them: $t(X) = 4X^3 + 3X^2 + 15X + 14$.
+- Now $C$ on the domain is $[0, 16, 14, 1]$: the rule fails at rows 1 and 2 ($4^2 \neq 15$, $15^2 \neq 1$).
+- Dividing by $Z$ leaves remainder $7X^2 + 10X$. **$C/Z$ is not a polynomial at all**; it's a rational function with poles where the rule broke.
+- The prover must still send *something* claimed to be $Q$, as a table of values on the evaluation domain. No polynomial of degree $< 4$ matches $C/Z$ there, so whatever table the prover sends is either far from low degree, which FRI catches, or inconsistent with $t$ at random points, which the spot checks catch.
 
 ### 4. Low-degree extension & domain blowup
 
-- **Evaluation domain $N$.** Expand the domain by a blowup factor $K$ (typically 4 or 8).
-- **Mathematical bound.** $d < N$, and $N$ must be available in the field.
-- **Reed–Solomon codeword generation.** Evaluating the degree-$d$ quotient over the size-$N$ domain turns the evaluation table into a Reed–Solomon codeword. The table *is* the codeword; "polynomial" and "codeword" are two views of one object.
+- **Evaluation domain size $N = K \cdot T$.** The blowup factor $K$ (typically 4 or 8) is defined against the trace length, not against $d$.
+- **Two size limits.**
+  - $d < N$ with margin. Since $d \approx (c-1)T$, this means **$K$ must exceed $c - 1$**, which is what limits how high the constraint degree $c$ can go for a given blowup.
+  - $N$ must be a power of two **dividing $p - 1$**, so it is bounded by the field's **2-adicity**, not by $p$ itself. Goldilocks has 2-adicity 32 and BabyBear 27, so those are the real ceilings. Mersenne-31 has 2-adicity 1 and admits no standard NTT domain at all, which is the whole motivation for Circle STARKs.
+- **Reed–Solomon codeword generation.** Evaluating the quotient (degree $< d$) over the size-$N$ domain turns the evaluation table into a Reed–Solomon codeword. The table *is* the codeword; "polynomial" and "codeword" are two views of one object.
 - **Soundness mechanism.**
-  - Unconstrained high-degree polynomials fit any data — you can interpolate anything through $N$ points.
+  - Unconstrained high-degree polynomials fit any data; you can interpolate anything through $N$ points.
   - Restricting to $d \ll N$ establishes a code rate $\rho = d/N$.
-  - Two distinct low-degree polynomials agree on fewer than $d$ of the $N$ points. (→ Part III, Fact 1.)
-  - So a liar's table differs from any valid codeword in at least $1-\rho$ of positions (75% at $K=4$), and spot-checking catches lies with high probability. (→ Part IV, strand 3, including its caveat.)
-
-> ⚠ **Two corrections to the sizing.**
-> 1. $N$ is normally set as $K \times$ (trace length), not $K \times d$. The blowup is defined against the domain the trace lives on; $d$ then has to fit under $N$ with margin, which is what constrains how high the constraint degree $c$ may go.
-> 2. "$N \le p-1$" is too weak. $N$ must be a power of two **dividing** $p-1$ — i.e. bounded by the **2-adicity** of the field, not by its size. Goldilocks has 2-adicity 32 and BabyBear 27, so those are the real ceilings. Mersenne-31 has 2-adicity 1 and admits no standard NTT domain at all, which is the entire motivation for Circle STARKs.
+  - Two distinct polynomials of degree $< d$ agree on fewer than $d$ of the $N$ points (→ Part III, Fact 1).
+  - So two distinct codewords differ in more than $1 - \rho$ of positions (75% at $K = 4$), and spot-checking catches a lie with high probability (→ Part IV, strand 3, including its caveat).
 
 ### 5. Commitment & verification protocol
 
@@ -131,7 +243,7 @@
 - Claims restricted to "program on input $x$ gave output $y$."
 - **The restriction is about the prover, not the verifier.** For an open conjecture the prover must first *discover* a proof. For computational integrity, **the witness is a free byproduct of doing the work** — you ran it, so you have the trace. Nothing to search for.
 - **Two contrasts to keep straight:**
-  - vs. **arbitrary mathematical claims** (the tutorial's literal contrast).
+  - vs. **arbitrary mathematical claims** (Anatomy of a STARK's literal contrast).
   - vs. **proving knowledge of a secret** (discrete log, preimage, graph coloring). CI is a claim about a *process*, not a secret.
 - → ZK is an **optional add-on**. A rollup proving 10,000 public transactions hides nothing; it just compresses verification. "Validity proof" is often the more accurate term.
 
@@ -158,13 +270,15 @@
 
 ---
 
-## Part VIII — Worked example: committing to a polynomial with a Reed–Solomon Merkle tree + FRI
+## Part VIII — Polynomial commitment with a Reed–Solomon Merkle tree + FRI
 
-*Every number here was computed, not invented: field $\mathbb{F}_{17}$, SHA-256 truncated to 8 hex characters so the hashes fit on a line. It continues the squaring example: the honest quotient there was $Q(X) = 4X^3 + 15X^2 + 14X + 3$.*
+### Example C
+
+*Every number here was computed, not invented: field $\mathbb{F}_{17}$, SHA-256 truncated to 8 hex characters so the hashes fit on a line. It continues Example B: the honest quotient there was $Q(X) = 4X^3 + 15X^2 + 14X + 3$.*
 
 **The goal.** The prover wants to commit to $Q$ and convince the verifier that "the thing I committed to is a polynomial of degree $< 4$" without sending $Q$. Three pieces do it: **Reed–Solomon encoding** (evaluate on a bigger domain), a **Merkle tree** (bind to those evaluations), and **FRI** (prove the evaluations are low degree by folding).
 
-### Step 1 — Reed–Solomon encode: evaluate on a larger domain
+#### Step 1 — Reed–Solomon encode: evaluate on a larger domain
 
 - Degree bound $d = 4$. Blowup $K = 2$ → evaluation domain of size $N = 8$, rate $\rho = 4/8 = 1/2$. (Real systems use $K \ge 4$; 2 keeps the tables short.)
 - $\omega = 9$ has order 8 in $\mathbb{F}_{17}$, so the domain is
@@ -176,9 +290,9 @@
 
 - This row of 8 values **is the Reed–Solomon codeword**. Only 4 of the values are free; the other 4 are forced by the degree bound. That redundancy is what makes lies detectable.
 - **Note the pairing:** $9^4 = 16 = -1$, so index $i$ and index $i+4$ hold $x$ and $-x$ (e.g. 13 and 4). FRI depends on this.
-- (In a real STARK the domain is a coset $g \cdot \langle\omega\rangle$, because the quotient must be computed off the trace domain. FRI runs identically on a coset, since $x$ and $-x$ still pair up.)
+- (In a real STARK the domain is a coset $h \cdot \langle\omega\rangle$, because the quotient must be computed off the trace domain; see Part V.3. FRI runs identically on a coset, since $x$ and $-x$ still pair up.)
 
-### Step 2 — Merkle-commit to the codeword
+#### Step 2 — Merkle-commit to the codeword
 
 Hash each value into a leaf, then hash pairs upward:
 
@@ -193,7 +307,7 @@ root:                                          4a4aa549
 - The prover sends **only the root `4a4aa549`**. This is the commitment: 8 bytes standing for 8 field elements, binding by collision resistance.
 - **What the root does *not* say:** anything about degree. A Merkle tree commits to *any* vector; it would hash 8 random numbers just as happily. The degree claim is FRI's job. (Part I: "FRI is the price of a commitment scheme with no math in it.")
 
-### Step 3 — FRI fold #1: halve the degree
+#### Step 3 — FRI fold #1: halve the degree
 
 - Split $Q$ into even and odd parts: $Q(X) = Q_e(X^2) + X\,Q_o(X^2)$, where $Q_e, Q_o$ have degree $< 2$.
 - Both parts can be recovered **pointwise from a pair** $\{x, -x\}$ without knowing coefficients:
@@ -212,7 +326,7 @@ $$Q_e(x^2) = \frac{Q(x) + Q(-x)}{2}, \qquad Q_o(x^2) = \frac{Q(x) - Q(-x)}{2x}$$
 - $Q_o = (16 - 11)/(2 \cdot 13) = 5/9 = 5 \cdot 2 = 10$  (since $9^{-1} = 2$)
 - $Q_1(16) = 5 + 13 \cdot 10 = 135 \equiv 16$ ✓
 
-### Step 4 — FRI fold #2: down to a constant
+#### Step 4 — FRI fold #2: down to a constant
 
 - $\alpha_2 = \text{hash}(\text{root}_0 \,\|\, \text{root}_1) \bmod 17 = 6$.
 - In domain $\{1, 13, 16, 4\}$, the pairs are $(1, 16)$ and $(13, 4)$, i.e. $y$ and $-y$ again.
@@ -221,7 +335,7 @@ $$Q_e(x^2) = \frac{Q(x) + Q(-x)}{2}, \qquad Q_o(x^2) = \frac{Q(x) - Q(-x)}{2x}$$
 
 **Degree trail:** $< 4 \to < 2 \to < 1$. Domain trail: $8 \to 4 \to 2$. Each fold halves both, and each one is the FFT butterfly run backwards (Part V.5).
 
-### Step 5 — The query phase: check the folds are honest
+#### Step 5 — The query phase: check the folds are honest
 
 So far the verifier has three things: two roots and a final constant. The prover could have committed garbage at every layer and invented the constant. The queries tie the layers together.
 
@@ -242,7 +356,7 @@ So far the verifier has three things: two roots and a final constant. The prover
 
 One query checks one thread through all layers. A real verifier repeats with ~30–80 independent query indices.
 
-### Step 6 — What a cheater runs into
+#### Step 6 — What a cheater runs into
 
 Suppose the prover commits a corrupted codeword, changing $Q(8)$ from 12 to 13: `[2, 10, 16, 3, 0, 13, 11, 4]`. This is no longer a degree-$<4$ evaluation.
 
@@ -256,11 +370,11 @@ Suppose the prover commits a corrupted codeword, changing $Q(8)$ from 12 to 13: 
 
 **Two lessons from Option B:**
 1. This is **why queries exist**: folding forces the lie into the open *somewhere*, and random positions find it.
-2. One corrupted value is the *close-to-a-codeword* case, and it's the hardest one to catch (1/4 here, not the $1 - \rho = 1/2$ from Part IV). A table far from every codeword gets caught much faster. Bounding exactly this behavior is what the **proximity-gap results** are about (Part IV caveat). It's also why real parameters use lower rates and more queries than this toy.
+2. One corrupted value is the *close-to-a-codeword* case, and it's the hardest one to catch (1/4 here, not the $1 - \rho = 1/2$ from Part IV). A table far from every codeword gets caught much faster. Bounding exactly this behavior is what **proximity gaps** are about: proven for moderate parameters, conjectured for aggressive ones (Part IV caveat). It's also why real parameters use lower rates and more queries than this toy.
 
-### The whole protocol on one line
+#### The whole protocol on one line
 
-> **Commit** (evaluate on a $K\times$ domain, Merkle-root it) → **fold** $\log_2 d$ times with Fiat–Shamir $\alpha$'s, committing each layer → **send the final constant** → **open $s$ random threads**, each checking Merkle paths and one fold equation per layer.
+> **Commit** (evaluate on a $K\times$ domain, Merkle-root it) → **fold** about $\log_2 d$ times with Fiat–Shamir $\alpha$'s, committing each layer → **send the final constant** → **open $s$ random threads**, each checking Merkle paths and one fold equation per layer.
 
 Proof size is $O(s \cdot \log^2 N)$ hashes: $s$ queries × $\log N$ layers × a $\log N$-length Merkle path. That's why STARK proofs are tens to hundreds of KB, compared with a few hundred bytes for KZG-based SNARKs.
 
@@ -274,12 +388,13 @@ Proof size is $O(s \cdot \log^2 N)$ hashes: $s$ queries × $\log N$ layers × a 
 ## Threads not yet covered
 
 - **Fact 3:** division with remainder in $\mathbb{F}_p[X]$ → gcd, extended Euclid, exact vs. inexact division.
-- **Fact 4:** evaluation ↔ interpolation as two views of one polynomial; **evaluations on a fixed domain = Reed–Solomon codeword**. The tutorial keeps the coefficient view; most other sources use the evaluation view — knowing they're the same object saves confusion. (Partly discharged in Part V.4.)
-- **Fact 5:** degree arithmetic, and the bookkeeping of what bound each committed polynomial must meet.
-- **FFT/NTT:** $f(X) = f_e(X^2) + Xf_o(X^2)$ with $\omega^{i+n/2} = -\omega^i$. **FRI's folding is the same move**: take $f_e + \alpha f_o$ to halve the degree.
-- **Multivariate polynomials:** AIR transition constraints in $2w$ variables; symbolic substitution of $t_i(X), t_i(\omega X)$; a degree-$k$ constraint on degree-$(n-1)$ trace polys gives degree $\approx k(n-1)$, which sets the blowup; Schwartz–Zippel in $m$ variables.
-- **Cosets** as a first-class topic: why quotient computation requires one, and why the vanishing polynomial is constant there.
+- **Fact 4:** evaluation ↔ interpolation as two views of one polynomial; **evaluations on a fixed domain = Reed–Solomon codeword**. Anatomy of a STARK keeps the coefficient view; most other sources use the evaluation view, and knowing they're the same object saves confusion. (Partly covered in Part V.4 and Example C, Step 1.)
+- **Fact 5:** degree arithmetic in general, and the bookkeeping of what bound each committed polynomial must meet. (The quotient's bound is covered in Part V.2.)
+- **FFT/NTT as an algorithm:** $f(X) = f_e(X^2) + Xf_o(X^2)$ with $\omega^{i+n/2} = -\omega^i$, the recursion, bit-reversal, and the inverse transform. The pairing identity appears in Example A, and FRI's use of the same split appears in Example C, Step 3; the transform itself isn't written out yet.
+- **Multivariate polynomials:** AIR transition constraints in $2w$ variables; symbolic substitution of $t_i(X), t_i(\omega X)$; Schwartz–Zippel in $m$ variables. (Degree consequences are in Part V.2.)
+- **Cosets** as a first-class topic. Why the quotient needs one is in Part V.3; how to choose the offset $h$ and why FRI is unaffected is not yet written out.
 - **DEEP / out-of-domain sampling:** why the verifier queries a point *outside* the evaluation domain before FRI begins.
+- **Zero-knowledge:** how randomizing the trace actually hides it (Part I mentions this only in passing).
 
 ---
 
@@ -291,13 +406,18 @@ Proof size is $O(s \cdot \log^2 N)$ hashes: $s$ queries × $\log N$ layers × a 
 2. Why does a prime modulus specifically buy you division? → II
 3. Why is the trace placed on roots of unity rather than $\{0,1,\ldots,n-1\}$? → II
 4. State Fact 1 and derive the "two polynomials agree rarely" consequence. → III
-5. A prover lies about one trace step. What *exactly* goes wrong with the quotient — and why is that the detectable thing? → III, V.3
+5. A prover lies about one trace step. What *exactly* goes wrong with the quotient — and why is that the detectable thing? → III, V.3, Example B
 6. Why can't you compute the quotient on the trace domain itself? → V.3
 7. What bounds the evaluation domain size: $p$, or something else? → V.4
 8. Rate $\rho=1/8$, 30 queries. Soundness, and what caveat qualifies that number? → IV
 9. Why must a protocol be public-coin to survive Fiat–Shamir? → VI
 10. What is weak Fiat–Shamir, and why does it break soundness rather than completeness? → VII
-11. A Merkle root commits to a vector. What does it *not* tell the verifier, and which step fills that gap? → VIII.2
-12. From $f(x)$ and $f(-x)$ alone, how do you compute the folded value at $x^2$? Why does folding halve the degree? → VIII.3
-13. A cheater corrupts one codeword value and fakes the next layer. Where does the inconsistency show up, and with what probability does one query catch it here? → VIII.6
-14. Why does changing one committed value change every FRI challenge? → VIII.6
+11. A Merkle root commits to a vector. What does it *not* tell the verifier, and which step fills that gap? → Example C, Step 2
+12. From $f(x)$ and $f(-x)$ alone, how do you compute the folded value at $x^2$? Why does folding halve the degree? → Example C, Step 3
+13. A cheater corrupts one codeword value and fakes the next layer. Where does the inconsistency show up, and with what probability does one query catch it here? → Example C, Step 6
+14. Why does changing one committed value change every FRI challenge? → Example C, Step 6
+15. Why is checking $g^{2^{118}} \neq 1$ enough to prove $g$ has order exactly $2^{119}$? → Example A, Step 2
+16. How many squarings take $g$ to a 1024th root of unity in Anatomy's field, and why does $\omega^{512} = -1$ matter? → Example A, Step 3
+17. A 1024-row Fibonacci trace sits on $\langle\omega\rangle$. Is that the trace domain or the evaluation domain, and how many polynomials does it produce? → Example A, Step 4
+18. Why does the transition constraint's vanishing polynomial leave out one row, and what would go wrong if it didn't? → V.3, Example B
+19. Constraint degree $c = 3$. What is the smallest blowup $K$ that works, and why? → V.2, V.4
